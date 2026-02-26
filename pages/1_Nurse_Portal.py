@@ -1,5 +1,5 @@
 import streamlit as st
-from app.db import get_supabase, fetch_stock, create_request, add_request_lines, fetch_requests, fetch_request_lines
+from app.db import get_supabase, fetch_stock, create_request, add_request_lines, fetch_requests_for_nurse, fetch_request_lines
 from app.ui import format_stock_table
 from app.constants import STATUS_LABELS
 
@@ -10,22 +10,28 @@ if "session" not in st.session_state or st.session_state.session is None:
     st.warning("Please login from Home.")
     st.stop()
 
-profile = st.session_state.profile
-if profile["role"] != "NURSE":
-    st.error("Access denied.")
+profile = st.session_state.get("profile")
+if not profile or profile.get("role") != "NURSE":
+    st.error("Access denied. This page is for NURSE users only.")
     st.stop()
 
-school_id = profile["school_id"]
+school_id = profile.get("school_id")
+if school_id is None:
+    st.error("Your profile is missing school_id. Please set school_id in user_profiles.")
+    st.stop()
 
 st.title("Nurse Portal")
-st.caption("You can only see items available in the central store. Items with 0 show as Out of stock.")
 
-stock = fetch_stock(sb).data
+stock = fetch_stock(sb)
 df = format_stock_table(stock)
 
-st.subheader("Items by Category")
+st.subheader("Available Items (Central Store)")
 if df.empty:
-    st.info("No items found yet.")
+    st.warning(
+        "No stock data found.\n\n"
+        "Make sure your Supabase database has the view `v_stock_on_hand` "
+        "and the `items` + `inventory_transactions` tables."
+    )
 else:
     for cat in ["MEDICINE", "CONSUMABLES", "STATIONERY"]:
         with st.expander(cat.title(), expanded=True):
@@ -34,7 +40,7 @@ else:
 st.divider()
 st.subheader("Create a Request")
 
-requestable = [r for r in stock if int(r["on_hand"]) > 0]
+requestable = [r for r in stock if int(r.get("on_hand", 0)) > 0]
 if not requestable:
     st.info("All items are currently out of stock.")
 else:
@@ -53,25 +59,31 @@ else:
 
     notes = st.text_area("Notes (optional)")
     if st.button("Submit request", type="primary", use_container_width=True, disabled=(len(lines) == 0)):
-        req_res = create_request(sb, school_id=school_id, nurse_user_id=profile["user_id"], notes=notes)
-        req_id = req_res.data[0]["request_id"]
-        add_request_lines(sb, req_id, lines)
-        st.success(f"Request submitted. Request ID: {req_id}")
-        st.rerun()
+        try:
+            req_id = create_request(sb, school_id=school_id, nurse_user_id=profile["user_id"], notes=notes)
+            add_request_lines(sb, req_id, lines)
+            st.success(f"Request submitted. Request ID: {req_id}")
+            st.rerun()
+        except Exception as e:
+            st.error("Failed to submit request. Check database tables and RLS policies.")
+            st.caption(str(e))
 
 st.divider()
 st.subheader("My Requests History")
 
-reqs = fetch_requests(sb).data
+reqs = fetch_requests_for_nurse(sb, profile["user_id"])
 if not reqs:
     st.info("No requests yet.")
 else:
-    for r in reqs[:30]:
-        label = STATUS_LABELS.get(r["status"], r["status"])
-        with st.expander(f'Request #{r["request_id"]} — {label} — {r["created_at"]}'):
-            lines = fetch_request_lines(sb, r["request_id"]).data
-            for ln in lines:
-                item = ln["items"]["item_name"]
-                rq = ln["requested_qty"]
-                ap = ln.get("approved_qty", None)
-                st.write(f"- **{item}** | Requested: {rq} | Approved: {ap if ap is not None else '—'}")
+    for r in reqs[:50]:
+        label = STATUS_LABELS.get(r.get("status", ""), r.get("status", "UNKNOWN"))
+        with st.expander(f'Request #{r["request_id"]} — {label} — {r.get("created_at","")}'):
+            lines = fetch_request_lines(sb, r["request_id"])
+            if not lines:
+                st.write("No lines found.")
+            else:
+                for ln in lines:
+                    item = ln["items"]["item_name"] if ln.get("items") else ln.get("item_id")
+                    rq = ln.get("requested_qty")
+                    ap = ln.get("approved_qty")
+                    st.write(f"- **{item}** | Requested: {rq} | Approved: {ap if ap is not None else '—'}")
