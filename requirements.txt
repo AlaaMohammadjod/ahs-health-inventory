@@ -1,4 +1,1 @@
 streamlit
-supabase-py
-pandas
-reportlab
